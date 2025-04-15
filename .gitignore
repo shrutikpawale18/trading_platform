@@ -1,13 +1,23 @@
 # Environment variables
 backend/.env
+frontend/.env.local # Frontend local env
 
 # Python virtual environment
 .venv/
 .venv311/
+backend/venv/ # Specific backend venv
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Databases and Backups
+backend/trading.db
+backend/backups/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/.next/
 
 # IDE/OS specific
 .DS_Store
