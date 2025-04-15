@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+numpy
+numba
+python-jose[cryptography]
+passlib[bcrypt]
+alchemy
+psycopg2-binary
+python-dotenv
+alpaca-py
+httpx 
