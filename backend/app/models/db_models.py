@@ -63,18 +63,18 @@ class Algorithm(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="algorithms")
-    signals = relationship("Signal", back_populates="algorithm")
+    signals = relationship("Signal", back_populates="algorithm", cascade="all, delete-orphan")
 
 class Signal(Base):
     __tablename__ = "signals"
 
-    id = Column(Integer, primary_key=True, index=True) # Keep Integer ID for Signal
-    algorithm_id = Column(Integer, ForeignKey("algorithms.id")) # Foreign key to Algorithm.id (Integer)
+    id = Column(Integer, primary_key=True, index=True)
+    algorithm_id = Column(Integer, ForeignKey("algorithms.id"))
     type = Column(SQLEnum(SignalType))
     symbol = Column(String, index=True)
-    confidence = Column(Float) # Use confidence from db_models.py (strength was in database.py)
-    additional_data = Column(JSON, nullable=True) # Keep renamed metadata
-    created_at = Column(DateTime, default=datetime.utcnow) # Use created_at (timestamp was in database.py)
+    confidence = Column(Float)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    additional_data = Column(JSON, nullable=True)
 
     algorithm = relationship("Algorithm", back_populates="signals")
     trades = relationship("Trade", back_populates="signal")
