@@ -4,9 +4,9 @@ from pydantic import BaseModel
 from typing import Optional
 
 class SignalType(str, Enum):
-    BUY = "buy"
-    SELL = "sell"
-    HOLD = "hold"
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
 
 class Signal(BaseModel):
     type: SignalType
