@@ -1,19 +1,22 @@
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from fastapi import HTTPException
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from alpaca.trading.requests import MarketOrderRequest, GetPortfolioHistoryRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 from app.models.position import Position, PositionStatus
 from app.models.trade import Trade, TradeType, TradeStatus
 from alpaca.trading.models import PortfolioHistory
 import httpx
+from alpaca.common.exceptions import APIError
+from functools import lru_cache
+import time
 
 # Load environment variables
 load_dotenv()
@@ -84,6 +87,8 @@ class AlpacaService:
             self.secret_key = secret
             self.paper = paper
             self.base_url = "https://paper-api.alpaca.markets" if paper else "https://api.alpaca.markets"
+            self._cache: Dict[str, Tuple[float, datetime]] = {}
+            self._cache_ttl = 60  # Cache TTL in seconds
         except Exception as e:
             print(f"!!! FAILED to initialize Alpaca API: {e!r}")
             raise HTTPException(status_code=500, detail=f"Failed to initialize Alpaca API: {str(e)}")
@@ -106,6 +111,7 @@ class AlpacaService:
             raise HTTPException(status_code=400, detail=str(e))
 
     async def place_order(self, symbol: str, qty: float, side: str, time_in_force: str = 'day'):
+        """Place a market order with string parameters."""
         print(f"--- Placing order for {symbol}: {side} {qty} shares ---")
         try:
             # Verify trading client is initialized
@@ -130,7 +136,44 @@ class AlpacaService:
             order = self.trading_client.submit_order(order_data=order_request)
             
             print(f"--- Order submitted successfully: {order} ---")
+            
+            # Create and return a Trade object
+            return Trade(
+                symbol=symbol,
+                type=TradeType.BUY if order_side == OrderSide.BUY else TradeType.SELL,
+                quantity=float(qty),
+                price=float(order.filled_avg_price) if order.filled_avg_price else None,
+                status=TradeStatus.FILLED if order.status == 'filled' else TradeStatus.PENDING,
+                timestamp=datetime.utcnow()
+            )
+        except Exception as e:
+            logger.error(f"!!! Exception during place_order: {e!r}")
+            raise HTTPException(status_code=400, detail=str(e))
+
+    async def get_order_status(self, order_id: str):
+        """Get the status of a specific order."""
+        print(f"--- Getting order status for {order_id} ---")
+        try:
+            order = self.trading_client.get_order_by_id(order_id)
             return {
+                "order_id": order.id,
+                "client_order_id": order.client_order_id,
+                "status": order.status,
+                "filled_avg_price": str(order.filled_avg_price) if order.filled_avg_price else None,
+                "qty": str(order.qty),
+                "filled_qty": str(order.filled_qty),
+                "symbol": order.symbol
+            }
+        except Exception as e:
+            logger.error(f"!!! Exception during get_order_status: {e!r}")
+            raise HTTPException(status_code=400, detail=str(e))
+
+    async def get_open_orders(self):
+        """Get all open orders."""
+        print("--- Getting open orders ---")
+        try:
+            orders = self.trading_client.get_orders(status='open')
+            return [{
                 "order_id": order.id,
                 "client_order_id": order.client_order_id,
                 "status": order.status,
@@ -138,158 +181,164 @@ class AlpacaService:
                 "qty": str(order.qty),
                 "filled_qty": str(order.filled_qty),
                 "filled_avg_price": str(order.filled_avg_price) if order.filled_avg_price else None
-            }
+            } for order in orders]
         except Exception as e:
-            print(f"!!! Exception during place_order: {e!r}")
-            raise HTTPException(status_code=400, detail=str(e))
-    
-    async def get_order_status(self, order_id: str):
-        print(f"--- Calling get_order() for {order_id} ---")
-        try:
-            # Note: This would need to be implemented with the trading API client
-            # For now, returning a mock response
-            return {
-                "order_id": order_id,
-                "client_order_id": "mock_client_order_id",
-                "status": "filled",
-                "filled_avg_price": "100.00",
-                "qty": "1",
-                "filled_qty": "1",
-                "symbol": "AAPL"
-            }
-        except Exception as e:
-            print(f"!!! Exception during get_order_status: {e!r}")
-            raise HTTPException(status_code=400, detail=str(e))
-
-    async def get_open_orders(self):
-        print("--- Calling list_orders() with status=open ---")
-        try:
-            # Note: This would need to be implemented with the trading API client
-            # For now, returning a mock response
-            return []
-        except Exception as e:
-            print(f"!!! Exception during get_open_orders: {e!r}")
+            logger.error(f"!!! Exception during get_open_orders: {e!r}")
             raise HTTPException(status_code=400, detail=str(e))
 
     async def cancel_order(self, order_id: str):
-        print(f"--- Calling cancel_order() for {order_id} ---")
+        """Cancel a specific order."""
+        print(f"--- Cancelling order {order_id} ---")
         try:
-            # Note: This would need to be implemented with the trading API client
-            # For now, returning a mock response
-            return {"status": "cancelled"}
+            self.trading_client.cancel_order_by_id(order_id)
+            return {"status": "cancelled", "order_id": order_id}
         except Exception as e:
-            print(f"!!! Exception during cancel_order: {e!r}")
+            logger.error(f"!!! Exception during cancel_order: {e!r}")
             raise HTTPException(status_code=400, detail=str(e))
 
     async def get_assets(self):
-        print("--- Calling list_assets() ---")
+        """Get all tradable assets."""
+        print("--- Getting tradable assets ---")
         try:
-            # Note: This would need to be implemented with the trading API client
-            # For now, returning a mock response
-            return []
+            assets = self.trading_client.get_all_assets()
+            return [{
+                "id": asset.id,
+                "symbol": asset.symbol,
+                "name": asset.name,
+                "status": asset.status,
+                "tradable": asset.tradable,
+                "marginable": asset.marginable,
+                "shortable": asset.shortable,
+                "easy_to_borrow": asset.easy_to_borrow,
+                "fractionable": asset.fractionable
+            } for asset in assets if asset.tradable]
         except Exception as e:
-            print(f"!!! Exception during get_assets: {e!r}")
+            logger.error(f"!!! Exception during get_assets: {e!r}")
             raise HTTPException(status_code=400, detail=str(e))
 
-    async def get_historical_bars(self, symbol: str, timeframe: str = '1D', lookback_days: int = None, limit: int = 1000):
-        print(f"--- Getting historical bars for {symbol} with timeframe={timeframe}, lookback_days={lookback_days}, limit={limit} ---")
+    def _get_cached_data(self, key: str) -> Optional[float]:
+        if key in self._cache:
+            value, timestamp = self._cache[key]
+            if (datetime.now(timezone.utc) - timestamp).total_seconds() < self._cache_ttl:
+                return value
+            del self._cache[key]
+        return None
+
+    def _set_cached_data(self, key: str, value: float):
+        self._cache[key] = (value, datetime.now(timezone.utc))
+
+    @lru_cache(maxsize=100)
+    async def get_historical_bars(
+        self, 
+        symbol: str, 
+        timeframe: str = '1D', 
+        lookback_days: int = None,
+        start_date: datetime = None,
+        end_date: datetime = None,
+        limit: int = 1000
+    ):
+        print(f"--- Getting historical bars for {symbol} with timeframe={timeframe} ---")
         try:
             # Convert timeframe string to TimeFrame object
-            timeframe_map = {
-                '1D': TimeFrame.Day,
-                '1H': TimeFrame.Hour,
-                '15Min': TimeFrame(15, TimeFrame.Minute),
-                '5Min': TimeFrame(5, TimeFrame.Minute),
-                '1Min': TimeFrame(1, TimeFrame.Minute)
-            }
-            
-            # Get the timeframe or raise an error if not supported
-            if timeframe not in timeframe_map:
-                raise ValueError(f"Unsupported timeframe: {timeframe}. Supported timeframes are: {list(timeframe_map.keys())}")
-            
-            tf = timeframe_map[timeframe]
-            print(f"--- Using TimeFrame object: {tf} ---")
-            
-            # Calculate start date based on lookback_days
-            end_date = datetime.now()
-            if lookback_days is not None:
-                # Add a buffer to ensure enough trading days are covered
-                start_date = end_date - timedelta(days=int(lookback_days * 1.5) + 1) 
+            if timeframe == '1D':
+                tf = TimeFrame.Day
+            elif timeframe == '1H':
+                tf = TimeFrame.Hour
+            elif timeframe == '15Min':
+                tf = TimeFrame(15, TimeFrameUnit.Minute)
+            elif timeframe == '5Min':
+                tf = TimeFrame(5, TimeFrameUnit.Minute)
+            elif timeframe == '1Min':
+                tf = TimeFrame(1, TimeFrameUnit.Minute)
             else:
-                start_date = end_date - timedelta(days=45) # Default buffer for 30 days
+                raise ValueError(f"Unsupported timeframe: {timeframe}")
             
-            # Format dates as YYYY-MM-DD strings
-            start_date_str = start_date.strftime("%Y-%m-%d")
-            end_date_str = end_date.strftime("%Y-%m-%d")
+            print(f"--- Mapped timeframe string '{timeframe}' to TimeFrame object: {tf} ---")
+
+            # Calculate date range
+            if start_date is None or end_date is None:
+                end_date = datetime.now(timezone.utc) - timedelta(minutes=15)  # Add 15-minute delay
+                if lookback_days is not None:
+                    start_date = end_date - timedelta(days=lookback_days)
+                else:
+                    start_date = end_date - timedelta(days=30)  # Default to 30 days
             
-            print(f"--- Fetching data from {start_date_str} to {end_date_str} ---")
+            print(f"--- Fetching data from {start_date} to {end_date} ---")
             
             # Create request parameters for historical bars
             request_params = StockBarsRequest(
                 symbol_or_symbols=[symbol],  # Pass as list
                 timeframe=tf,
-                start=start_date_str,
-                end=end_date_str,
-                limit=limit # Use the limit parameter
+                start=start_date,
+                end=end_date,
+                limit=limit,
+                feed='iex'  # Use IEX feed for better compatibility
             )
             
-            print(f"--- Request parameters: {request_params} ---")
+            print(f"--- Request parameters constructed: {request_params} ---")
             
             # Get the historical bars
             bars_response = self.market_data_client.get_stock_bars(request_params)
             print(f"--- Raw response type: {type(bars_response)} ---")
             
-            if not bars_response:
+            if not bars_response or symbol not in bars_response:
                 raise HTTPException(status_code=400, detail=f"No bars data returned for symbol {symbol}")
+            
+            # Extract bars for the symbol
+            bars = bars_response[symbol]
+            print(f"--- Number of bars received for {symbol}: {len(bars)} ---")
+            
+            # Convert bars to a list of dictionaries with the correct attributes
+            processed_bars = []
+            for bar in bars:
+                processed_bars.append({
+                    'timestamp': bar.timestamp,
+                    'open': float(bar.open),
+                    'high': float(bar.high),
+                    'low': float(bar.low),
+                    'close': float(bar.close),
+                    'volume': float(bar.volume)
+                })
+            
+            return processed_bars
 
-            # Get bars for the specific symbol
-            symbol_bars = bars_response.data.get(symbol, [])
-            print(f"--- Number of bars received for {symbol}: {len(symbol_bars)} ---")
-
-            if not symbol_bars:
-                raise HTTPException(status_code=400, detail=f"No bars available in response for symbol {symbol}")
-
-            # Convert bars to list of closing prices
-            prices = []
-            for bar in symbol_bars:
-                try:
-                    # Each bar object has attributes like 'close', 'high', 'low', etc.
-                    if hasattr(bar, 'close'):
-                        prices.append(bar.close)
-                    else:
-                        print(f"--- Unexpected bar object format (missing 'close'): {bar} ---")
-                        continue
-                except Exception as e:
-                    print(f"--- Error processing bar: {e!r}, bar: {bar} ---")
-                    continue
-            
-            if not prices:
-                print(f"--- No prices could be extracted from bars ---")
-                print(f"--- First bar sample: {symbol_bars[0] if symbol_bars else 'No bars'} ---")
-                raise HTTPException(status_code=400, detail=f"Could not extract closing prices from bars for symbol {symbol}")
-            
-            print(f"--- Extracted {len(prices)} price points for {symbol} ---")
-            print(f"--- First price: {prices[0] if prices else 'None'}, Last price: {prices[-1] if prices else 'None'} ---")
-            
-            # Check if we have enough data points for the algorithm
-            if len(prices) < 20:  # Minimum required for long window
-                print(f"--- Warning: Not enough data ({len(prices)}) for long window (20). Adjust lookback or timeframe? ---")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Not enough price data ({len(prices)}) for the long window (20). Try increasing lookback_days or using a different timeframe."
-                )
-            
-            # Ensure we don't exceed the requested limit (if provided)
-            if limit and len(prices) > limit:
-                prices = prices[-limit:]
-                print(f"--- Truncated prices to requested limit: {limit} ---")
-
-            return prices
-            
         except Exception as e:
-            print(f"!!! Exception during get_historical_bars: {e!r}")
-            print(f"!!! Exception Type: {type(e).__name__}, Message: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Error fetching historical bars: {str(e)}")
+            print(f"!!! Error getting historical bars: {e!r}")
+            raise HTTPException(status_code=400, detail=str(e))
+
+    async def get_latest_price(self, symbol: str) -> Optional[float]:
+        """Fetches the latest ask price for a given stock symbol with caching."""
+        print(f"--- Fetching latest quote for {symbol} ---")
+        try:
+            # Check cache first
+            cached_price = self._get_cached_data(f"price_{symbol}")
+            if cached_price is not None:
+                print(f"--- Using cached price for {symbol}: {cached_price} ---")
+                return cached_price
+
+            if not hasattr(self, 'market_data_client'):
+                raise ValueError("Market data client not initialized")
+            
+            request_params = StockLatestQuoteRequest(symbol_or_symbols=symbol)
+            latest_quote_response = self.market_data_client.get_stock_latest_quote(request_params)
+            
+            quote = latest_quote_response.get(symbol)
+            
+            if not quote:
+                logger.warning(f"Could not get latest quote for {symbol}")
+                return None
+            
+            latest_price = quote.ask_price
+            print(f"--- Latest ask price for {symbol}: {latest_price} ---")
+            
+            # Cache the price
+            self._set_cached_data(f"price_{symbol}", float(latest_price))
+            
+            return float(latest_price)
+
+        except Exception as e:
+            logger.error(f"!!! Exception fetching latest quote for {symbol}: {e!r}")
+            return None
 
     async def get_position(self, symbol: str) -> Optional[Position]:
         """Get the current position for a symbol."""
@@ -307,30 +356,6 @@ class AlpacaService:
             return None
         except Exception as e:
             logger.error(f"Error getting position for {symbol}: {str(e)}")
-            return None
-
-    async def place_order(self, symbol: str, quantity: float, side: OrderSide) -> Optional[Trade]:
-        """Place a market order."""
-        try:
-            order_data = MarketOrderRequest(
-                symbol=symbol,
-                qty=quantity,
-                side=side,
-                time_in_force=TimeInForce.DAY
-            )
-            
-            order = self.trading_client.submit_order(order_data)
-            
-            return Trade(
-                symbol=symbol,
-                type=TradeType.BUY if side == OrderSide.BUY else TradeType.SELL,
-                quantity=quantity,
-                price=float(order.filled_avg_price) if order.filled_avg_price else None,
-                status=TradeStatus.FILLED if order.status == 'filled' else TradeStatus.PENDING,
-                timestamp=datetime.utcnow()
-            )
-        except Exception as e:
-            logger.error(f"Error placing order for {symbol}: {str(e)}")
             return None
 
     async def close_position(self, symbol: str) -> Optional[Trade]:
@@ -428,3 +453,31 @@ class AlpacaService:
             # Catch-all for other unexpected errors (e.g., JSON parsing)
             logger.error(f"!!! Unexpected error processing portfolio history: {e!r}")
             return None
+
+    async def is_asset_valid(self, symbol: str) -> bool:
+        """Checks if an asset symbol exists and is tradable on Alpaca."""
+        print(f"--- Validating asset symbol: {symbol} ---")
+        try:
+            if not hasattr(self, 'trading_client'):
+                logger.error("Trading client not initialized during asset validation.")
+                return False # Or raise an internal error
+            
+            asset = self.trading_client.get_asset(symbol)
+            if asset and asset.tradable:
+                print(f"--- Asset {symbol} is valid and tradable. Status: {asset.status} ---")
+                return True
+            else:
+                status = asset.status if asset else 'Not Found'
+                tradable_status = asset.tradable if asset else 'N/A'
+                logger.warning(f"Asset {symbol} is not valid/tradable. Status: {status}, Tradable: {tradable_status}")
+                return False
+        except APIError as e:
+             # Specifically catch APIError for cases like 404 Not Found
+             if e.status_code == 404:
+                 logger.warning(f"Asset {symbol} not found on Alpaca.")
+             else:
+                 logger.error(f"!!! API Error validating asset {symbol}: {e!r}")
+             return False
+        except Exception as e:
+            logger.error(f"!!! Unexpected error validating asset {symbol}: {e!r}")
+            return False # Treat unexpected errors as invalid for safety
