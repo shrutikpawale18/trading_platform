@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import logging
 from app.services.alpaca_service import AlpacaService
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -19,37 +20,37 @@ class DataService:
     ) -> pd.DataFrame:
         """Get historical market data for a symbol."""
         try:
+            # Calculate lookback period
+            lookback_days = (end_date - start_date).days
+            print(f"--- Calculated lookback period: {lookback_days} days ---")
+            
             # Get historical bars from Alpaca
             bars = await self.alpaca_service.get_historical_bars(
                 symbol=symbol,
                 timeframe=timeframe,
-                start_date=start_date,
-                end_date=end_date
+                lookback_days=lookback_days
             )
             
             if not bars:
-                logger.warning(f"No data returned for {symbol}")
+                print(f"Warning: No bars returned for {symbol}")
                 return pd.DataFrame()
-
-            # Convert bars to DataFrame
-            df = pd.DataFrame([{
-                'timestamp': bar.t,
-                'open': bar.o,
-                'high': bar.h,
-                'low': bar.l,
-                'close': bar.c,
-                'volume': bar.v
-            } for bar in bars])
             
-            # Set timestamp as index
+            print(f"--- Received {len(bars)} bars from Alpaca ---")
+            
+            # Create DataFrame from the processed bars
+            df = pd.DataFrame(bars)
             df.set_index('timestamp', inplace=True)
             df.sort_index(inplace=True)
             
+            print(f"--- Created DataFrame with shape: {df.shape} ---")
+            print(f"--- DataFrame columns: {df.columns.tolist()} ---")
+            print(f"--- First few rows of DataFrame:\n{df.head()} ---")
+            
             return df
-
+            
         except Exception as e:
-            logger.error(f"Error getting historical data for {symbol}: {str(e)}")
-            return pd.DataFrame()
+            print(f"!!! Error in get_historical_data: {e!r}")
+            raise HTTPException(status_code=400, detail=str(e))
 
     async def get_latest_price(self, symbol: str) -> Optional[float]:
         """Get the latest price for a symbol."""
