@@ -37,8 +37,8 @@ def upgrade() -> None:
         sa.Column('type', sa.Enum('buy', 'sell', 'hold', name='signaltype'), nullable=False),
         sa.Column('symbol', sa.String(), nullable=False),
         sa.Column('confidence', sa.Float(), nullable=False),
-        sa.Column('metadata', sa.JSON(), nullable=True),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
+        sa.Column('timestamp', sa.DateTime(), nullable=False),
+        sa.Column('additional_data', sa.JSON(), nullable=True),
         sa.ForeignKeyConstraint(['algorithm_id'], ['algorithms.id'], ),
         sa.PrimaryKeyConstraint('id')
     )
